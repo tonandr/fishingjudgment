@@ -10,6 +10,8 @@
             FishingJudgement is added and being developed.
         -Sep. 14, 2016
             Development from test to train has completed.
+        -Sep. 16, 2016
+            Optimization methods are applied.
 '''
 
 import csv
@@ -131,7 +133,7 @@ class FishingJudgment:
         # Get spark context.
         self.sc = sc
     
-    def train(self, trainingCSVFilePath, numLayers, _numActs):
+    def train(self, trainingCSVFilePath, numLayers, _numActs, opt, sampleRatio = 1.0):
         '''
             Train.
         '''
@@ -145,16 +147,19 @@ class FishingJudgment:
         for i in range(numLayers):
             numActs[i] = _numActs[i]
         
-        self.fjnn = self.gateway.entry_point.getSparkNeuralNetwork(self.sc, numLayers, numActs)
+        self.fjnn = self.gateway.entry_point.getSparkNeuralNetwork(numLayers, numActs, opt)
         
         # Pre-processing training data.
         pShipVoyageInfos = self.preprocessTrainingData(shipVoyageInfos)
         
-        # Make matrix data for training data.
-        X = self.gateway.entry_point.getMatrix(self.NUM_FACTORS, len(pShipVoyageInfos), 0.0)
-        Y = self.gateway.entry_point.getMatrix(1, len(pShipVoyageInfos), 0.0) # Check row length.
+        # Calculate the number of samples for training according to sample ratio.
+        numSamples = int(len(pShipVoyageInfos) * sampleRatio)
         
-        for i in range(len(pShipVoyageInfos)):
+        # Make matrix data for training data.
+        X = self.gateway.entry_point.getMatrix(self.NUM_FACTORS, numSamples, 0.0)
+        Y = self.gateway.entry_point.getMatrix(1, numSamples, 0.0) # Check row length.
+        
+        for i in range(numSamples):
             if debugFlag:
                 print str(i)
                 
@@ -175,7 +180,7 @@ class FishingJudgment:
             Y.setVal(1, i + 1, v.isFishing)
         
         # Train.
-        self.fjnn.train(X, Y)
+        self.fjnn.train(self.sc, X, Y)
         
     def test(self, testingCSVFilePath):
         '''
@@ -314,22 +319,41 @@ class FishingJudgment:
         # Calculate average values for missing factors.
         # position.
         pLats = np.asfarray([v.pos.lat for v in f if ((v.pos.lat >= 0.0) & (v.pos.lat != 91.0))])
-        pLongs = np.asfarray([v.pos.lat for v in f if ((v.pos.long >= 0.0) & (v.pos.long != 181.0))])
+        pLongs = np.asfarray([v.pos.long for v in f if ((v.pos.long >= 0.0) & (v.pos.long != 181.0))])
         nLats = np.asfarray([v.pos.lat for v in f if (v.pos.lat < 0.0)])
-        nLongs = np.asfarray([v.pos.lat for v in f if (v.pos.long < 0.0)])    
+        nLongs = np.asfarray([v.pos.long for v in f if (v.pos.long < 0.0)])    
         
-        self.aPLat = pLats.mean()
-        self.aPLong = pLongs.mean()
-        self.aNLat = nLats.mean()
-        self.aNLong = nLongs.mean()
+        if pLats.size == 0:
+            self.aPlat = 0.0
+        else:
+            self.aPLat = pLats.mean()
+            
+        if pLongs.size == 0:
+            self.aPLongs = 0.0
+        else:
+            self.aPLongs = pLongs.mean()
+                
+        if nLats.size == 0:
+            self.nPlat = 0.0
+        else:
+            self.nPLat = nLats.mean()
+            
+        if nLongs.size == 0:
+            self.nPLongs = 0.0
+        else:
+            self.nPLongs = nLongs.mean()
         
         # SOG.
         sogs = np.asfarray([v.sog for v in f if (v.sog < 102.3)])
         self.aSOG = sogs.mean()
         
+        print sogs[:10]
+        
         # COG.
         cogs = np.asfarray([v.cog for v in f if (v.cog < 360.0)])
         self.aCOG = cogs.mean()
+        
+        print cogs[:10]
         
         for i in range(len(f)):
                         
@@ -423,13 +447,13 @@ class FishingJudgment:
             for row in csvReader:   
                 aisMessage = row[11]
                 
-                if (debugFlag):
+                if (debugFlag&False):
                     print str(count) + ": "  + aisMessage
                 
                 # Check exception.
                 # Conduct checksum.
                 if (self.__checksum__(aisMessage) != True):
-                    if (DebugFlag):
+                    if (debugFlag):
                         print str(count) + ", Checksum failed."
                     continue
                                                 
@@ -520,7 +544,7 @@ class FishingJudgment:
         shipVoyageInfos = list()
         
         # Read a csv file.
-        with open(trainingCSVFilePath, 'rb') as csvFile:
+        with open(testingCSVFilePath, 'rb') as csvFile:
             csvReader = csv.reader(csvFile, delimiter=',', quotechar='"' )
             csvReader.next()
             
@@ -529,14 +553,86 @@ class FishingJudgment:
             for row in csvReader:
                 aisMessage = row[1]
                 
-                if (debugFlag):
+                if (debugFlag&False):
                     print str(count) + ": "  + aisMessage
                 
                 # Check exception.
                 # Conduct checksum.
+                isCheckSum = True
+                
                 if (self.__checksum__(aisMessage) != True):
-                    if (DebugFlag):
+                    if (debugFlag):
                         print str(count) + ", Checksum failed."
+                        isCheckSum = False
+                
+                if (isCheckSum == False):
+                    
+                    # Extract ship voyage info. affecting fishing.
+                    shipVoyageInfo = ShipVoyageInfo()
+                
+                    # Get a time stamp value and extract year, days for 1 year and seconds for 1 day values.
+                    shipVoyageInfo.utcTimeStamp = float(row[0])
+                
+                    t = datetime.datetime.fromtimestamp(shipVoyageInfo.utcTimeStamp)
+                
+                    shipVoyageInfo.year = float(t.year)
+                
+                    # Calculate days for 1 year.
+                    thisYearFirstDay = datetime.datetime(year=t.year, month=1, day=1)
+                    diffDateTime = t - thisYearFirstDay
+                
+                    shipVoyageInfo.days = float(diffDateTime.days)
+                
+                    # Calculate seconds for 1 day.
+                    thisDay = datetime.datetime(year=t.year, month=t.month, day=t.day)
+                    diffDateTime = t - thisDay
+                
+                    shipVoyageInfo.seconds = float(diffDateTime.seconds)
+                
+                    # Decode a AIS message.
+                    '''
+                        The NMEA message type and sentence relevant information are
+                        assumed to be identical, so it isn't necessary to be decoded. 
+                    '''
+                                
+                    aisMessageSplited = aisMessage.split(',')
+                
+                    # Get a channel type.
+                    if (aisMessageSplited[4] == 'A'):
+                        shipVoyageInfo.channelType = float(0)
+                    elif (aisMessageSplited[4] == 'B'):
+                        shipVoyageInfo.channelType = float(1)
+                    else:
+                        shipVoyageInfo.channelType = float(-1)
+                    
+                    # Decode a AIS sentence.
+                    # Get a padding value.
+                    padCheckString = aisMessageSplited[6]
+                    padCheckStringSplited = padCheckString.split('*')
+                    padding = int(padCheckStringSplited[0])
+                
+                    r = ais.decode(aisMessageSplited[5], padding)
+
+                    # Extract features from the decoded AIS sentence information.
+                    shipVoyageInfo.mmsi = float(r['mmsi'])
+                
+                    shipVoyageInfo.pos.lat = float(r['x'])
+                    shipVoyageInfo.pos.long = float(r['y'])
+                    shipVoyageInfo.pos.accuracy = float(r['position_accuracy'])
+                
+                    #shipVoyageInfo.naviStatus = r['nav_status'] # Check it!
+                    shipVoyageInfo.sog = float(r['sog']) # Check it!
+                    shipVoyageInfo.cog = float(r['cog']) # Check it!
+                    #shipVoyageInfo.trueHeading = r['true_heading'] # Check it.
+        
+                    shipVoyageInfo.isRAIM = r['raim']
+                
+                    shipVoyageInfo.index = count
+                                 
+                    shipVoyageInfos.append(shipVoyageInfo)
+                    count = count + 1
+                    
+                    continue
                                                 
                 # Extract ship voyage info. affecting fishing.
                 shipVoyageInfo = ShipVoyageInfo()
