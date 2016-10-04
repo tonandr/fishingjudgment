@@ -14,6 +14,8 @@
             Optimization methods are applied.
         -Sep. 17, 2016
             Gradient checking is added.
+        -Oct. 4, 2016
+            AUC, Gini coefficient and score calculation portions are added for model performance evaluation.
 '''
 
 import csv
@@ -121,12 +123,12 @@ class FishingJudgment:
     '''
         Fishing judgment module.
     '''
-    
+        
     X_FILE_NAME = "X.ser"
     Y_FILE_NAME = "Y.ser"
     
-    TX_FILE_NAME = "TX.ser"
-    TY_FILE_NAME = "TY.ser"
+    TRAINING_X_FILE_NAME = "TR_X.ser"
+    TESTING_X_FILE_NAME = "TE_X.ser"
     
     NUM_FACTORS = 11
     
@@ -141,7 +143,7 @@ class FishingJudgment:
         # Get spark context.
         self.sc = sc
     
-    def train(self, trainingCSVFilePath, numLayers, _numActs, opt, loadFlag = False, isGradientChecking = False, sampleRatio = 1.0):
+    def train(self, trainingCSVFilePath, numLayers, _numActs, opt, l, alpha, loadFlag = False, isGradientChecking = False, JEstimationFlag = False, sampleRatio = 1.0):
         '''
             Train.
         '''
@@ -162,6 +164,7 @@ class FishingJudgment:
             RY = self.gateway.jvm.maum.dm.Matrix.loadMatrix(self.Y_FILE_NAME)
             
             # Calculate the number of samples for training according to sample ratio.
+            # RX is assumed to have full samples.
             numSamples = int(RX.colLength() * sampleRatio)
             
             # Extract X, Y from RX, RY.
@@ -175,10 +178,10 @@ class FishingJudgment:
             Y = RY.getSubMatrix(yRange)
             
             # Train.
-            return self.fjnn.train(self.sc, X, Y, isGradientChecking)
+            return self.fjnn.train(self.sc, X, Y, l, alpha, isGradientChecking, JEstimationFlag)
             
         # Parse a training csv file.
-        shipVoyageInfos = self.parseTrainingCSVFile(trainingCSVFilePath)
+        shipVoyageInfos = self.parseTrainingCSVFile(trainingCSVFilePath, sampleRatio)
         
         # Create a training model using Neural Network via Spark.
         numActs = self.gateway.new_array(self.gateway.jvm.int, numLayers)
@@ -191,8 +194,8 @@ class FishingJudgment:
         # Pre-processing training data.
         pShipVoyageInfos = self.preprocessTrainingData(shipVoyageInfos)
         
-        # Calculate the number of samples for training according to sample ratio.
-        numSamples = int(len(pShipVoyageInfos) * sampleRatio)
+        # Get the number of samples.
+        numSamples = int(len(pShipVoyageInfos))
         
         # Make matrix data for training data.
         X = self.gateway.entry_point.getMatrix(self.NUM_FACTORS, numSamples, 0.0)
@@ -223,26 +226,37 @@ class FishingJudgment:
         Y.saveMatrix(self.Y_FILE_NAME)
         
         # Train.
-        return self.fjnn.train(self.sc, X, Y, isGradientChecking)
+        return self.fjnn.train(self.sc, X, Y, l, alpha, isGradientChecking, JEstimationFlag)
     
-    def test(self, testingCSVFilePath, loadFlag=False):
+    def test(self, CSVFilePath, sampleRatio, loadFlag=False, isTrainingData=False):
         '''
             Test.
         '''
+        
+        shipVoyageInfos = None; 
         
         # Check the load flag.
         if (loadFlag == True):
             
             # Parse a testing csv file.
-            shipVoyageInfos = self.parseTestingCSVFile(testingCSVFilePath)
+            if (isTrainingData):
+                shipVoyageInfos = self.parseTrainingCSVFile(CSVFilePath, sampleRatio)
+            else:
+                self.parseTestingCSVFile(CSVFilePath, sampleRatio)
                 
             # Pre-processing training data.
             pShipVoyageInfos = self.preprocessTrainingData(shipVoyageInfos)
                         
             # Get X.
-            RX = self.gateway.jvm.maum.dm.Matrix.loadMatrix(self.TX_FILE_NAME)
+            RX = None
+            
+            if (isTrainingData):
+                RX = self.gateway.jvm.maum.dm.Matrix.loadMatrix(self.TRAINING_X_FILE_NAME)
+            else:
+                RX = self.gateway.jvm.maum.dm.Matrix.loadMatrix(self.TESTING_X_FILE_NAME)
     
-            numSamples = RX.colLength()
+            # RX is assumed to have full samples.
+            numSamples = int(RX.colLength() * sampleRatio)
                         
             # Extract X from RX.
             xRange = self.gateway.new_array(self.gateway.jvm.int, 4)
@@ -255,7 +269,7 @@ class FishingJudgment:
         
             # Return predicted fishing confidence values according to input samples' order.
             # Assign fishing confidence values.
-            for i in range(len(pShipVoyageInfos)):
+            for i in range(numSamples):
                 pShipVoyageInfos[i].fishingProb = Yhat.getVal(1, i + 1)
         
             # Reorder results.
@@ -267,38 +281,53 @@ class FishingJudgment:
             return (result, pShipVoyageInfos)
         
         # Parse a testing csv file.
-        shipVoyageInfos = self.parseTestingCSVFile(testingCSVFilePath)
+        if (isTrainingData):
+            shipVoyageInfos = self.parseTrainingCSVFile(CSVFilePath, sampleRatio)
+        else:
+            self.parseTestingCSVFile(CSVFilePath, sampleRatio)
                 
-        # Pre-processing training data.
+        # Pre-processing testing data.
         pShipVoyageInfos = self.preprocessTrainingData(shipVoyageInfos)
         
-        # Make matrix data for training data.
-        X = self.gateway.entry_point.getMatrix(self.NUM_FACTORS, len(pShipVoyageInfos), 0.0)
+        # Make matrix data for testing data.
+        RX = self.gateway.entry_point.getMatrix(self.NUM_FACTORS, len(pShipVoyageInfos), 0.0)
         
         for i in range(len(pShipVoyageInfos)):
             v = pShipVoyageInfos[i]
             
-            X.setVal(1, i + 1, v.year)
-            X.setVal(2, i + 1, v.days)
-            X.setVal(3, i + 1, v.seconds)
-            X.setVal(4, i + 1, v.pos.lat)
-            X.setVal(5, i + 1, v.pos.long)
-            X.setVal(6, i + 1, v.pos.accuracy)
-            X.setVal(7, i + 1, v.sog)
-            X.setVal(8, i + 1, v.cog)
-            X.setVal(9, i + 1, v.posVariation)
-            X.setVal(10, i + 1, v.sogDiff)
-            X.setVal(11, i + 1, v.cogDiff)
+            RX.setVal(1, i + 1, v.year)
+            RX.setVal(2, i + 1, v.days)
+            RX.setVal(3, i + 1, v.seconds)
+            RX.setVal(4, i + 1, v.pos.lat)
+            RX.setVal(5, i + 1, v.pos.long)
+            RX.setVal(6, i + 1, v.pos.accuracy)
+            RX.setVal(7, i + 1, v.sog)
+            RX.setVal(8, i + 1, v.cog)
+            RX.setVal(9, i + 1, v.posVariation)
+            RX.setVal(10, i + 1, v.sogDiff)
+            RX.setVal(11, i + 1, v.cogDiff)
         
         # Save X.
-        X.saveMatrix(self.TX_FILE_NAME)
+        if (isTrainingData):
+            RX.saveMatrix(self.TRAINING_X_FILE_NAME)
+        else:
+            RX.saveMatrix(self.TESTING_X_FILE_NAME)
         
         # Predict fishing confidence.
+        # Calculate the number of samples and extract X according to the number of samples.
+        numSamples = int(len(pShipVoyageInfos) * sampleRatio)
+        
+        # Extract X from RX.
+        xRange = self.gateway.new_array(self.gateway.jvm.int, 4)
+        xRange[0] = 1; xRange[1] = RX.rowLength(); xRange[2] = 1; xRange[3] = numSamples
+
+        X = RX.getSubMatrix(xRange)
+        
         Yhat = self.fjnn.predictProb(X)
         
         # Return predicted fishing confidence values according to input samples' order.
         # Assign fishing confidence values.
-        for i in range(len(pShipVoyageInfos)):
+        for i in range(numSamples):
             pShipVoyageInfos[i].fishingProb = Yhat.getVal(1, i + 1)
         
         # Reorder results.
@@ -309,13 +338,13 @@ class FishingJudgment:
         
         return (result, pShipVoyageInfos)
     
-    def testAndSave(self, testingCSVFilePath, loadFlag = False):
+    def testAndSave(self, CSVFilePath, sampleRatio, loadFlag = False, isTrainingData=False):
         '''
             Test and save result into a csv file.
         '''
         
         # Test.
-        results = self.test(testingCSVFilePath, loadFlag)
+        results = self.test(CSVFilePath, sampleRatio, loadFlag, isTrainingData)
         result = results[0]
         pShipVoyageInfos = results[1]
         
@@ -331,10 +360,72 @@ class FishingJudgment:
             for v in result:
                 csvWriter.writerow([v])
     
-    def evaluatePerf(self, trainingCSVFilePath, trainingSampleRatio):
+    def evaluatePerf(self, trainingCSVFilePath, sampleRatio, loadFlag = False):
         '''
             Evaluate the performance of the fishing judgment model.
         '''
+        
+        # Test with training samples.
+        results = self.test(trainingCSVFilePath, sampleRatio, loadFlag, isTrainingData = True)
+        result = results[0]
+        pShipVoyageInfos = results[1]
+        
+        # Assign 0.0 for samples with checksum error.        
+        for i in range(len(pShipVoyageInfos)):
+            if (pShipVoyageInfos[i].utcTimeStamp == -1.0):
+                result[i]= 0
+        
+        # Get a ground truth list.
+        groundTruths = list()
+        
+        for v in pShipVoyageInfos:
+            if v.isFishing == True:
+                groundTruths.append(1.0)
+            else:
+                groundTruths.append(0.0)
+        
+        # Calculate a Gini coefficient value.
+        # Calculate the area under ROC approximately.
+        # Sort the result and ground truth lists together into descending order.
+        for i in range(len(result)):
+            for j in range(i + 1, len(result)):
+                if (result[i] < result[j]):
+                    tempResult = result[i]
+                    result[i] = result[j]
+                    result[j] = tempResult
+                    
+                    tempGT = groundTruths[i]
+                    groundTruths[i] = groundTruths[j]
+                    groundTruths[j] = tempGT 
+        
+        # Calculate TPRs and FPRs.
+        numTPRs = float(groundTruths.count(1.0))
+        numFPRs = float(groundTruths.count(0.0))
+        
+        TPRs = list()
+        FPRs = list()
+        
+        for v in groundTruths:
+            TPRs.append(v / TPRs)
+            FPRs.append((v - 1.0) / FPRs)
+        
+        # Calculate AUC.
+        AUC = 0.0
+        
+        for i in range(len(TPRs)):
+            if i == 0:
+                AUC = AUC + TPRs[i] * (FPRs[i])
+            else:
+                AUC = AUC + TPRs[i] * (FPRs[i] - FPRs[i - 1])
+                
+        # Calculate Gini coefficent.
+        gini = 2.0 * AUC - 1.0
+        
+        # Calculate a score.
+        score = 1000000.0 * gini
+            
+        print score
+        return score
         
     def evaluateLearningCurve(self, trainingCSVFilePath, trainingSampleRatio, sampleRatioStep):
         '''
@@ -407,8 +498,8 @@ class FishingJudgment:
         
         # Calculate average values for missing factors.
         # position.
-        pLats = np.asfarray([v.pos.lat for v in f if ((v.pos.lat >= 0.0) & (v.pos.lat != 91.0))])
-        pLongs = np.asfarray([v.pos.long for v in f if ((v.pos.long >= 0.0) & (v.pos.long != 181.0))])
+        pLats = np.asfarray([v.pos.lat for v in f if ((v.pos.lat >= 0.0) & (v.pos.lat != (91.0 / 90.0)))])
+        pLongs = np.asfarray([v.pos.long for v in f if ((v.pos.long >= 0.0) & (v.pos.long != (181.0 / 180.0)))])
         nLats = np.asfarray([v.pos.lat for v in f if (v.pos.lat < 0.0)])
         nLongs = np.asfarray([v.pos.long for v in f if (v.pos.long < 0.0)])    
         
@@ -433,33 +524,29 @@ class FishingJudgment:
             self.nPLongs = nLongs.mean()
         
         # SOG.
-        sogs = np.asfarray([v.sog for v in f if (v.sog < 102.3)])
+        sogs = np.asfarray([v.sog for v in f if (v.sog < (102.3 / 102.2))])
         self.aSOG = sogs.mean()
         
-        print sogs[:10]
-        
         # COG.
-        cogs = np.asfarray([v.cog for v in f if (v.cog < 360.0)])
+        cogs = np.asfarray([v.cog for v in f if (v.cog < (360.0 / 360.0))])
         self.aCOG = cogs.mean()
-        
-        print cogs[:10]
         
         for i in range(len(f)):
                         
             # Position.
             # Fill missing values.
-            if (f[i].pos.lat == 91.0):
+            if (f[i].pos.lat == (91.0 / 90.0)):
                 f[i].pos.lat = self.aPLat
             
-            if (f[i].pos.long == 181.0):
+            if (f[i].pos.long == (181.0 / 180.0)):
                 f[i].pos.long = self.aPLong
             
             # SOG.
-            if (f[i].sog == 102.3):
+            if (f[i].sog == (102.3 / 102.2)):
                 f[i].sog = self.aSOG
             
             # COG.
-            if (f[i].cog >= 360.0):
+            if (f[i].cog >= (360.0 / 360.0)):
                 f[i].cog = self.aCOG   
                 
     def __compF__(self, x, y):
@@ -515,7 +602,7 @@ class FishingJudgment:
         
         return True
         
-    def parseTrainingCSVFile(self, trainingCSVFilePath):
+    def parseTrainingCSVFile(self, trainingCSVFilePath, sampleRatio):
         '''
             Parse a training csv file.
         '''
@@ -541,9 +628,41 @@ class FishingJudgment:
                 
                 # Check exception.
                 # Conduct checksum.
+                isCheckSum = True
+                
                 if (self.__checksum__(aisMessage) != True):
                     if (debugFlag):
                         print str(count) + ", Checksum failed."
+                    isCheckSum = False
+                
+                if (isCheckSum == False):    
+                    shipVoyageInfo = ShipVoyageInfo()
+                
+                    shipVoyageInfo.utcTimeStamp = -1.0                
+                    shipVoyageInfo.year = 0.0               
+                    shipVoyageInfo.days = 0.0              
+                    shipVoyageInfo.seconds = 0.0
+                
+                    shipVoyageInfo.channelType = float(-1)
+                    
+                    shipVoyageInfo.mmsi = 0.0
+                
+                    shipVoyageInfo.pos.lat = 91.0 / 90.0
+                    shipVoyageInfo.pos.long = 181.0 / 180.0
+                    shipVoyageInfo.pos.accuracy = 0.0
+                
+                    #shipVoyageInfo.naviStatus = r['nav_status'] # Check it!
+                    shipVoyageInfo.sog = 511.0 / 102.2
+                    shipVoyageInfo.cog = 360.0 / 360.0
+                    #shipVoyageInfo.trueHeading = r['true_heading'] # Check it.
+        
+                    shipVoyageInfo.isRAIM = False
+                
+                    shipVoyageInfo.index = count
+                                 
+                    shipVoyageInfos.append(shipVoyageInfo)
+                    count = count + 1
+                    
                     continue
                                                 
                 # Extract ship voyage info. affecting fishing.
@@ -554,19 +673,19 @@ class FishingJudgment:
                 
                 t = datetime.datetime.fromtimestamp(shipVoyageInfo.utcTimeStamp)
                 
-                shipVoyageInfo.year = float(t.year)
+                shipVoyageInfo.year = 0.0 #float(t.year)
                 
                 # Calculate days for 1 year.
                 thisYearFirstDay = datetime.datetime(year=t.year, month=1, day=1)
                 diffDateTime = t - thisYearFirstDay
                 
-                shipVoyageInfo.days = float(diffDateTime.days)
+                shipVoyageInfo.days = float(diffDateTime.days) / 365.0
                 
                 # Calculate seconds for 1 day.
                 thisDay = datetime.datetime(year=t.year, month=t.month, day=t.day)
                 diffDateTime = t - thisDay
                 
-                shipVoyageInfo.seconds = float(diffDateTime.seconds)
+                shipVoyageInfo.seconds = float(diffDateTime.seconds) / (24.0 * 3600.0)
                 
                 # Decode a AIS message.
                 '''
@@ -595,13 +714,13 @@ class FishingJudgment:
                 # Extract features from the decoded AIS sentence information.
                 shipVoyageInfo.mmsi = float(r['mmsi'])
                 
-                shipVoyageInfo.pos.lat = float(r['x'])
-                shipVoyageInfo.pos.long = float(r['y'])
+                shipVoyageInfo.pos.lat = float(r['x']) / 90.0
+                shipVoyageInfo.pos.long = float(r['y']) /180.0
                 shipVoyageInfo.pos.accuracy = float(r['position_accuracy'])
                 
                 #shipVoyageInfo.naviStatus = r['nav_status'] # Check it!
-                shipVoyageInfo.sog = float(r['sog']) # Check it!
-                shipVoyageInfo.cog = float(r['cog']) # Check it!
+                shipVoyageInfo.sog = float(r['sog']) / 102.2 # Check it! 
+                shipVoyageInfo.cog = float(r['cog']) / 360.0 # Check it!
                 #shipVoyageInfo.trueHeading = r['true_heading'] # Check it.
         
                 shipVoyageInfo.isRAIM = r['raim']
@@ -619,7 +738,10 @@ class FishingJudgment:
                 shipVoyageInfos.append(shipVoyageInfo)
                 count = count + 1
         
-        return shipVoyageInfos        
+        # Get samples according to sample ratio.
+        numSamples = int(len(shipVoyageInfos) * sampleRatio) 
+        
+        return [shipVoyageInfos[i] for i in range(numSamples)]        
                 
     def parseTestingCSVFile(self, testingCSVFilePath):
         '''
@@ -667,13 +789,13 @@ class FishingJudgment:
                     
                     shipVoyageInfo.mmsi = 0.0
                 
-                    shipVoyageInfo.pos.lat = 91.0
-                    shipVoyageInfo.pos.long = 181.0
+                    shipVoyageInfo.pos.lat = 91.0 / 90.0
+                    shipVoyageInfo.pos.long = 181.0 / 180.0
                     shipVoyageInfo.pos.accuracy = 0.0
                 
                     #shipVoyageInfo.naviStatus = r['nav_status'] # Check it!
-                    shipVoyageInfo.sog = 511.0
-                    shipVoyageInfo.cog = 360.0
+                    shipVoyageInfo.sog = 511.0 / 102.2
+                    shipVoyageInfo.cog = 360.0 / 360.0
                     #shipVoyageInfo.trueHeading = r['true_heading'] # Check it.
         
                     shipVoyageInfo.isRAIM = False
@@ -693,19 +815,19 @@ class FishingJudgment:
                 
                 t = datetime.datetime.fromtimestamp(shipVoyageInfo.utcTimeStamp)
                 
-                shipVoyageInfo.year = float(t.year)
+                shipVoyageInfo.year = 0.0 #float(t.year)
                 
                 # Calculate days for 1 year.
                 thisYearFirstDay = datetime.datetime(year=t.year, month=1, day=1)
                 diffDateTime = t - thisYearFirstDay
                 
-                shipVoyageInfo.days = float(diffDateTime.days)
+                shipVoyageInfo.days = float(diffDateTime.days) / 360.0
                 
                 # Calculate seconds for 1 day.
                 thisDay = datetime.datetime(year=t.year, month=t.month, day=t.day)
                 diffDateTime = t - thisDay
                 
-                shipVoyageInfo.seconds = float(diffDateTime.seconds)
+                shipVoyageInfo.seconds = float(diffDateTime.seconds) / (24.0 * 3600.0)
                 
                 # Decode a AIS message.
                 '''
@@ -734,13 +856,13 @@ class FishingJudgment:
                 # Extract features from the decoded AIS sentence information.
                 shipVoyageInfo.mmsi = float(r['mmsi'])
                 
-                shipVoyageInfo.pos.lat = float(r['x'])
-                shipVoyageInfo.pos.long = float(r['y'])
+                shipVoyageInfo.pos.lat = float(r['x']) / 90.0
+                shipVoyageInfo.pos.long = float(r['y']) / 180.0
                 shipVoyageInfo.pos.accuracy = float(r['position_accuracy'])
                 
                 #shipVoyageInfo.naviStatus = r['nav_status'] # Check it!
-                shipVoyageInfo.sog = float(r['sog']) # Check it!
-                shipVoyageInfo.cog = float(r['cog']) # Check it!
+                shipVoyageInfo.sog = float(r['sog']) / 102.2# Check it!
+                shipVoyageInfo.cog = float(r['cog']) / 360.0 # Check it!
                 #shipVoyageInfo.trueHeading = r['true_heading'] # Check it.
         
                 shipVoyageInfo.isRAIM = r['raim']
@@ -750,7 +872,10 @@ class FishingJudgment:
                 shipVoyageInfos.append(shipVoyageInfo)
                 count = count + 1
         
-        return shipVoyageInfos                
+        # Get samples according to sample ratio.
+        numSamples = int(len(shipVoyageInfos) * sampleRatio) 
+        
+        return [shipVoyageInfos[i] for i in range(numSamples)]                  
             
             
             
