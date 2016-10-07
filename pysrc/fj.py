@@ -143,7 +143,7 @@ class FishingJudgment:
         # Get spark context.
         self.sc = sc
     
-    def train(self, trainingCSVFilePath, numLayers, _numActs, opt, l, alpha, loadFlag = False, isGradientChecking = False, JEstimationFlag = False, sampleRatio = 1.0):
+    def train(self, trainingCSVFilePath, numLayers, _numActs, opt, l, alpha, loadFlag = False, isGradientChecking = False, JEstimationFlag = False, JEstimationRatio = 1.0, sampleRatio = 1.0):
         '''
             Train.
         '''
@@ -178,7 +178,7 @@ class FishingJudgment:
             Y = RY.getSubMatrix(yRange)
             
             # Train.
-            return self.fjnn.train(self.sc, X, Y, l, alpha, isGradientChecking, JEstimationFlag)
+            return self.fjnn.train(self.sc, X, Y, l, alpha, isGradientChecking, JEstimationFlag, JEstimationRatio)
             
         # Parse a training csv file.
         shipVoyageInfos = self.parseTrainingCSVFile(trainingCSVFilePath, sampleRatio)
@@ -226,7 +226,7 @@ class FishingJudgment:
         Y.saveMatrix(self.Y_FILE_NAME)
         
         # Train.
-        return self.fjnn.train(self.sc, X, Y, l, alpha, isGradientChecking, JEstimationFlag)
+        return self.fjnn.train(self.sc, X, Y, l, alpha, isGradientChecking, JEstimationFlag, JEstimationRatio)
     
     def test(self, CSVFilePath, sampleRatio, loadFlag=False, isTrainingData=False):
         '''
@@ -405,9 +405,15 @@ class FishingJudgment:
         TPRs = list()
         FPRs = list()
         
+        iTPR = 0.0
+        iFPR = 0.0
+        
         for v in groundTruths:
-            TPRs.append(v / TPRs)
-            FPRs.append((v - 1.0) / FPRs)
+            iTPR = iTPR + v
+            iFPR = iFPR + (1.0 - v)
+            
+            TPRs.append(iTPR / numTPRs)
+            FPRs.append(iFPR / numFPRs)
         
         # Calculate AUC.
         AUC = 0.0
@@ -425,7 +431,7 @@ class FishingJudgment:
         score = 1000000.0 * gini
             
         print score
-        return score
+        return (results, result, groundTruths, AUC, score)
         
     def evaluateLearningCurve(self, trainingCSVFilePath, trainingSampleRatio, sampleRatioStep):
         '''
@@ -443,8 +449,9 @@ class FishingJudgment:
         for v in shipVoyageInfos:
             if v.isFishing != -1:
                 fShipVoyageInfos.append(v)
+                print v.isFishing
         
-        # Sort it with ascending for time.
+        # Sort it in ascending order for time.
         fShipVoyageInfos.sort(cmp=self.__compF__)
         
         # Fill missing factors.
