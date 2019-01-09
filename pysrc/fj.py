@@ -143,7 +143,7 @@ class FishingJudgment:
         # Get spark context.
         self.sc = sc
     
-    def train(self, trainingCSVFilePath, numLayers, _numActs, opt, l, alpha, loadFlag = False, isGradientChecking = False, JEstimationFlag = False, JEstimationRatio = 1.0, sampleRatio = 1.0):
+    def train(self, trainingCSVFilePath, numLayers, _numActs, l, loadFlag = False, isGradientChecking = False, JEstimationFlag = False, JEstimationRatio = 1.0, sampleRatio = 1.0):
         '''
             Train.
         '''
@@ -157,7 +157,8 @@ class FishingJudgment:
             for i in range(numLayers):
                 numActs[i] = _numActs[i]
         
-            self.fjnn = self.gateway.entry_point.getSparkNeuralNetwork(numLayers, numActs, opt)
+            optimizer = self.gateway.entry_point.getNonlinearCGOptimizer()
+            self.fjnn = self.gateway.entry_point.getNeuralNetworkClassification(1, 0, numLayers, numActs, optimizer)
             
             # Get X, Y.
             RX = self.gateway.jvm.maum.dm.Matrix.loadMatrix(self.X_FILE_NAME)
@@ -177,8 +178,10 @@ class FishingJudgment:
             X = RX.getSubMatrix(xRange)
             Y = RY.getSubMatrix(yRange)
             
+            batchMode = 0; numSamplesForMiniBatch = 1; numRepeat = 1; numIter = 50; 
+            
             # Train.
-            return self.fjnn.train(self.sc, X, Y, l, alpha, isGradientChecking, JEstimationFlag, JEstimationRatio)
+            return self.fjnn.train(self.sc, X, Y, l, batchMode, numSamplesForMiniBatch, numRepeat, numIter, isGradientChecking, JEstimationFlag, JEstimationRatio)
             
         # Parse a training csv file.
         shipVoyageInfos = self.parseTrainingCSVFile(trainingCSVFilePath, sampleRatio)
@@ -189,8 +192,9 @@ class FishingJudgment:
         for i in range(numLayers):
             numActs[i] = _numActs[i]
         
-        self.fjnn = self.gateway.entry_point.getSparkNeuralNetwork(numLayers, numActs, opt)
-        
+        optimizer = self.gateway.entry_point.getNonlinearCGOptimizer()
+        self.fjnn = self.gateway.entry_point.getNeuralNetworkClassification(1, 0, numLayers, numActs, optimizer)
+            
         # Pre-processing training data.
         pShipVoyageInfos = self.preprocessTrainingData(shipVoyageInfos)
         
@@ -226,7 +230,9 @@ class FishingJudgment:
         Y.saveMatrix(self.Y_FILE_NAME)
         
         # Train.
-        return self.fjnn.train(self.sc, X, Y, l, alpha, isGradientChecking, JEstimationFlag, JEstimationRatio)
+        batchMode = 0; numSamplesForMiniBatch = 1; numRepeat = 1; numIter = 50; 
+                
+        return self.fjnn.train(self.sc, X, Y, l, batchMode, numSamplesForMiniBatch, numRepeat, numIter, isGradientChecking, JEstimationFlag, JEstimationRatio)
     
     def test(self, CSVFilePath, sampleRatio, loadFlag=False, isTrainingData=False):
         '''
